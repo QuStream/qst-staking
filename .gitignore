@@ -1,0 +1,40 @@
+# Anchor
+.anchor
+target/
+**/*.rs.bk
+Cargo.lock
+
+# IDL
+*.so
+*.json
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Solana
+test-ledger/
+.env
+
+# Keypairs (NEVER commit private keys)
+*.json
+id.json
+deployer-keypair.json
+authority-keypair.json
+
+# Local deployment artifacts
+.env.local
