@@ -17,12 +17,12 @@ const BONUS_LOCK_PERIOD: i64 = 10 * 24 * 60 * 60;     // +10 days bonus
 const STAKE_WINDOW_PERIOD: i64 = 9 * 24 * 60 * 60;    // 9 days stake window (HAL-01 fix)
 const BONUS_ENROLLMENT_PERIOD: i64 = 48 * 60 * 60;    // 48 hours enrollment window
 const BONUS_WITHDRAWAL_DELAY: i64 = 1 * 24 * 60 * 60;     // 1 day after last user unlock (HAL-02 fix)
-const EARLY_UNSTAKE_THRESHOLD_1: i64 = 10 * 24 * 60 * 60; // 10 days
-const EARLY_UNSTAKE_THRESHOLD_2: i64 = 20 * 24 * 60 * 60; // 20 days
+const EARLY_UNSTAKE_THRESHOLD_1: i64 = 7 * 24 * 60 * 60; // 7 days
+const EARLY_UNSTAKE_THRESHOLD_2: i64 = 15 * 24 * 60 * 60; // 15 days
 
 // === PENALTIES ===
-const PENALTY_RATE_EARLY: u64 = 30; // 30% penalty for 20—10 days remaining
-const PENALTY_RATE_LATE: u64 = 20;  // 20% penalty for 10—0 days remaining
+const PENALTY_RATE_EARLY: u64 = 30; // 30% penalty for 15—8 days remaining
+const PENALTY_RATE_LATE: u64 = 20;  // 20% penalty for 7—1 days remaining
 
 #[program]
 pub mod qst_staking_mainnet {

@@ -16,12 +16,12 @@ const PRINCIPAL_LOCK_PERIOD: i64 = 60; // 1 minute for testing (represents 25 da
 const BONUS_LOCK_PERIOD: i64 = 30;     // +30 seconds bonus
 const STAKE_WINDOW_PERIOD: i64 = 300;  // 5 minutes stake window
 const BONUS_ENROLLMENT_PERIOD: i64 = 120; // 2 minutes enrollment window
-const EARLY_UNSTAKE_THRESHOLD_1: i64 = 20; // 20 seconds
-const EARLY_UNSTAKE_THRESHOLD_2: i64 = 40; // 40 seconds
+const EARLY_UNSTAKE_THRESHOLD_1: i64 = 14; // 14 seconds (represents 7 days in mainnet)
+const EARLY_UNSTAKE_THRESHOLD_2: i64 = 30; // 30 seconds (represents 15 days in mainnet)
 
 // === PENALTIES ===
-const PENALTY_RATE_EARLY: u64 = 30; // 30% penalty
-const PENALTY_RATE_LATE: u64 = 20;  // 20% penalty
+const PENALTY_RATE_EARLY: u64 = 30; // 30% penalty for 30—15 seconds remaining
+const PENALTY_RATE_LATE: u64 = 20;  // 20% penalty for 14—1 seconds remaining
 
 #[program]
 pub mod qst_staking_devnet {
