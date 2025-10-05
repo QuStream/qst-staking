@@ -566,11 +566,18 @@ pub mod qst_staking_mainnet {
             ErrorCode::Unauthorized
         );
 
-        // Only collect dust when penalty vault has tokens but very few enrolled users remain
-        // This prevents collecting rewards that should go to enrolled users
-        let dust_threshold = 1000; // Only collect when enrolled stake is very small
+        let current_time = Clock::get()?.unix_timestamp;
+
+        // Give users 2 months to claim their bonus rewards after bonus withdrawals become available
+        let bonus_claim_deadline = staking_pool.latest_bonus_unlock_time + BONUS_WITHDRAWAL_DELAY + (60 * 24 * 60 * 60); // +60 days (2 months)
         require!(
-            staking_pool.total_enrolled_stake <= dust_threshold && staking_pool.penalty_vault_amount > 0,
+            current_time >= bonus_claim_deadline,
+            ErrorCode::BonusClaimPeriodNotExpired
+        );
+
+        // Only collect when penalty vault has tokens
+        require!(
+            staking_pool.penalty_vault_amount > 0,
             ErrorCode::NoDustToCollect
         );
 
@@ -601,7 +608,7 @@ pub mod qst_staking_mainnet {
         // Reset penalty vault
         staking_pool.penalty_vault_amount = 0;
 
-        msg!("Collected {} dust tokens to dev wallet", dust_amount);
+        msg!("Collected {} unclaimed bonus tokens to dev wallet after 2-month claim period", dust_amount);
         Ok(())
     }
 
@@ -1009,4 +1016,6 @@ pub enum ErrorCode {
     NotEnrolledInBonus,
     #[msg("Must withdraw principal first before withdrawing bonus")]
     MustWithdrawPrincipalFirst,
+    #[msg("Bonus claim period has not expired. Users have 2 months to claim rewards.")]
+    BonusClaimPeriodNotExpired,
 }
