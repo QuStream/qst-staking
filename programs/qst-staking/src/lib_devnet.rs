@@ -16,6 +16,7 @@ const PRINCIPAL_LOCK_PERIOD: i64 = 60; // 1 minute for testing (represents 25 da
 const BONUS_LOCK_PERIOD: i64 = 30;     // +30 seconds bonus
 const STAKE_WINDOW_PERIOD: i64 = 300;  // 5 minutes stake window
 const BONUS_ENROLLMENT_PERIOD: i64 = 120; // 2 minutes enrollment window
+const BONUS_WITHDRAWAL_DELAY: i64 = 10;     // 10 seconds after last user unlock (represents 1 day in mainnet)
 const EARLY_UNSTAKE_THRESHOLD_1: i64 = 14; // 14 seconds (represents 7 days in mainnet)
 const EARLY_UNSTAKE_THRESHOLD_2: i64 = 30; // 30 seconds (represents 15 days in mainnet)
 
@@ -44,6 +45,7 @@ pub mod qst_staking_devnet {
         staking_pool.first_stake_timestamp = 0;
         staking_pool.bonus_enrollment_deadline = 0;
         staking_pool.stake_window_end = 0;
+        staking_pool.latest_bonus_unlock_time = 0; // HAL-02 fix
         staking_pool.qst_mint = ctx.accounts.qst_mint.key();
         staking_pool.bump = ctx.bumps.staking_pool;
 
@@ -108,6 +110,11 @@ pub mod qst_staking_devnet {
 
         // Set bonus unlock to principal + bonus period
         stake_account.bonus_unlock_time = stake_account.principal_unlock_time + BONUS_LOCK_PERIOD;
+
+        // HAL-02 fix: Track latest unlock time for bonus withdrawal delay
+        if stake_account.bonus_unlock_time > staking_pool.latest_bonus_unlock_time {
+            staking_pool.latest_bonus_unlock_time = stake_account.bonus_unlock_time;
+        }
 
         emit!(BonusEnrollment {
             user: ctx.accounts.user.key(),
@@ -192,6 +199,11 @@ pub mod qst_staking_devnet {
 
             if stake_account.enrolled_in_bonus {
                 stake_account.bonus_unlock_time = stake_account.principal_unlock_time + BONUS_LOCK_PERIOD;
+
+                // HAL-02 fix: Track latest unlock time for bonus withdrawal delay
+                if stake_account.bonus_unlock_time > staking_pool.latest_bonus_unlock_time {
+                    staking_pool.latest_bonus_unlock_time = stake_account.bonus_unlock_time;
+                }
             }
         }
 
@@ -231,6 +243,12 @@ pub mod qst_staking_devnet {
         require!(!stake_account.enrolled_in_bonus, ErrorCode::BonusEnrolledCannotUnstake);
 
         let current_time = Clock::get()?.unix_timestamp;
+
+        // HAL-01 fix: Ensure unstaking only happens after stake window ends
+        require!(
+            current_time > staking_pool.stake_window_end,
+            ErrorCode::StakeWindowStillActive
+        );
         let time_until_unlock = stake_account.principal_unlock_time - current_time;
 
         // DEVNET: Shortened time thresholds for testing
@@ -291,7 +309,8 @@ pub mod qst_staking_devnet {
 
         let current_time = Clock::get()?.unix_timestamp;
 
-        // Check appropriate unlock time based on enrollment status
+        // HAL-02 fix: Only check principal unlock time for withdrawing principal
+        // Bonus rewards are withdrawn separately via withdraw_bonus
         let required_unlock_time = if stake_account.enrolled_in_bonus {
             stake_account.bonus_unlock_time
         } else {
@@ -302,22 +321,10 @@ pub mod qst_staking_devnet {
         require!(stake_account.amount > 0, ErrorCode::NoStakeToWithdraw);
 
         let principal_amount = stake_account.amount;
-        let mut bonus_rewards = 0u64;
+        // HAL-02 fix: No bonus rewards calculated here anymore
+        let bonus_rewards = 0u64;
 
-        // Calculate bonus rewards if enrolled and bonus period ended
-        if stake_account.enrolled_in_bonus && current_time >= stake_account.bonus_unlock_time {
-            if staking_pool.total_enrolled_stake > 0 && staking_pool.penalty_vault_amount > 0 {
-                let pv = staking_pool.penalty_vault_amount as u128;
-                let user_amt = stake_account.amount as u128;
-                let total = staking_pool.total_enrolled_stake as u128;
-                bonus_rewards = if total > 0 { ((pv * user_amt) / total) as u64 } else { 0 };
-                
-                staking_pool.penalty_vault_amount =
-                    staking_pool.penalty_vault_amount.saturating_sub(bonus_rewards);
-            }
-        }
-
-        let total_withdrawal = principal_amount + bonus_rewards;
+        let total_withdrawal = principal_amount;
 
         // Setup PDA signer and transfer
         let authority_seed = b"staking_pool";
@@ -340,22 +347,107 @@ pub mod qst_staking_devnet {
             .checked_sub(principal_amount)
             .ok_or(ErrorCode::NumericOverflow)?;
 
-        if stake_account.enrolled_in_bonus {
-            staking_pool.total_enrolled_stake = staking_pool
-                .total_enrolled_stake
-                .saturating_sub(principal_amount);
-        }
+        // HAL-02 fix: Don't update total_enrolled_stake here - move to withdraw_bonus
+
+        emit!(WithdrawAllEvent {
+            user: ctx.accounts.user.key(),
+            principal_amount,
+            bonus_rewards,
+            total_withdrawn: total_withdrawal,
+            node_keys_retained: stake_account.node_keys_earned,
+            timestamp: current_time,
+        });
 
         // Reset stake account but keep node keys
         let node_keys_to_keep = stake_account.node_keys_earned;
         stake_account.amount = 0;
-        stake_account.node_keys_earned = node_keys_to_keep;
-        stake_account.enrolled_in_bonus = false;
+        stake_account.node_keys_earned = node_keys_to_keep; // Node keys are permanent
+        // HAL-02 fix: Don't reset enrolled_in_bonus here - move to withdraw_bonus
         stake_account.principal_unlock_time = 0;
         stake_account.bonus_unlock_time = 0;
 
-        msg!("DEVNET: User {} withdrew {} principal + {} bonus = {} total", 
-             ctx.accounts.user.key(), principal_amount, bonus_rewards, total_withdrawal);
+        msg!("DEVNET: User {} withdrew {} principal, keeping {} node keys",
+             ctx.accounts.user.key(), principal_amount, node_keys_to_keep);
+        Ok(())
+    }
+
+    // HAL-02 fix: Separate function to withdraw bonus rewards
+    pub fn withdraw_bonus(ctx: Context<WithdrawBonus>) -> Result<()> {
+        let stake_account = &mut ctx.accounts.stake_account;
+        let staking_pool = &mut ctx.accounts.staking_pool;
+
+        let current_time = Clock::get()?.unix_timestamp;
+
+        // Can only withdraw bonus 10 seconds after the latest unlock time of all users
+        let bonus_withdrawal_time = staking_pool.latest_bonus_unlock_time + BONUS_WITHDRAWAL_DELAY;
+        require!(current_time >= bonus_withdrawal_time, ErrorCode::BonusWithdrawalNotYetAvailable);
+
+        // User must have been enrolled in bonus and completed withdrawal of principal
+        require!(stake_account.enrolled_in_bonus, ErrorCode::NotEnrolledInBonus);
+        require!(stake_account.amount == 0, ErrorCode::MustWithdrawPrincipalFirst);
+
+        let user_token_account = &ctx.accounts.user_token_account;
+        let pool_token_account = &ctx.accounts.pool_token_account;
+
+        let mut bonus_rewards = 0u64;
+
+        // Calculate bonus rewards proportionally
+        if staking_pool.total_enrolled_stake > 0 && staking_pool.penalty_vault_amount > 0 {
+            // Use the user's last staked amount (stored in node_keys to track their share)
+            let pv = staking_pool.penalty_vault_amount as u128;
+            let user_original_stake = (stake_account.node_keys_earned as u64 / KEYS_PER_STAKE as u64) * MINIMUM_STAKE_AMOUNT;
+            let user_amt = user_original_stake as u128;
+            let total = staking_pool.total_enrolled_stake as u128;
+            bonus_rewards = if total > 0 { ((pv * user_amt) / total) as u64 } else { 0 };
+
+            staking_pool.penalty_vault_amount =
+                staking_pool.penalty_vault_amount.saturating_sub(bonus_rewards);
+        }
+
+        if bonus_rewards > 0 {
+            // Setup PDA signer
+            let authority_seed = b"staking_pool";
+            let bump_bytes = [staking_pool.bump];
+            let signer_seeds = &[authority_seed.as_ref(), bump_bytes.as_ref()];
+            let signer = &[signer_seeds.as_ref()];
+
+            // Transfer bonus amount to user
+            let cpi_accounts = Transfer {
+                from: pool_token_account.to_account_info(),
+                to: user_token_account.to_account_info(),
+                authority: staking_pool.to_account_info(),
+            };
+            let cpi_program = ctx.accounts.token_program.to_account_info();
+            let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer);
+            token::transfer(cpi_ctx, bonus_rewards)?;
+        }
+
+        emit!(BonusWithdrawEvent {
+            user: ctx.accounts.user.key(),
+            bonus_amount: bonus_rewards,
+            timestamp: current_time,
+        });
+
+        // HAL-02 fix: Update total_enrolled_stake and reset enrolled_in_bonus here
+        // Get the user's original stake amount for total_enrolled_stake calculation
+        let user_original_stake = (stake_account.node_keys_earned as u64 / KEYS_PER_STAKE as u64) * MINIMUM_STAKE_AMOUNT;
+
+        // Reduce total_enrolled_stake by user's original stake amount
+        staking_pool.total_enrolled_stake = staking_pool
+            .total_enrolled_stake
+            .saturating_sub(user_original_stake);
+
+        // Reset enrolled_in_bonus to prevent repeated withdrawals
+        stake_account.enrolled_in_bonus = false;
+
+        msg!(
+            "DEVNET: User {} withdrew {} bonus rewards, original stake {}, total_enrolled_stake now {}",
+            ctx.accounts.user.key(),
+            bonus_rewards,
+            user_original_stake,
+            staking_pool.total_enrolled_stake
+        );
+
         Ok(())
     }
 
@@ -399,7 +491,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = payer,
-        space = 8 + 32 + 8 + 8 + 8 + 8 + 8 + 8 + 32 + 1,
+        space = 8 + 32 + 8 + 8 + 8 + 8 + 8 + 8 + 8 + 32 + 1,
         seeds = [b"staking_pool"],
         bump
     )]
@@ -480,6 +572,22 @@ pub struct WithdrawAll<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+// HAL-02 fix: New accounts struct for bonus withdrawal
+#[derive(Accounts)]
+pub struct WithdrawBonus<'info> {
+    #[account(mut, seeds = [b"staking_pool"], bump = staking_pool.bump)]
+    pub staking_pool: Account<'info, StakingPool>,
+    #[account(mut, seeds = [b"stake_account", user.key().as_ref()], bump = stake_account.bump)]
+    pub stake_account: Account<'info, StakeAccount>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+    #[account(mut)]
+    pub user_token_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub pool_token_account: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+}
+
 #[derive(Accounts)]
 pub struct GetStakeInfo<'info> {
     #[account(seeds = [b"staking_pool"], bump = staking_pool.bump)]
@@ -498,6 +606,7 @@ pub struct StakingPool {
     pub first_stake_timestamp: i64,
     pub bonus_enrollment_deadline: i64,
     pub stake_window_end: i64,
+    pub latest_bonus_unlock_time: i64, // HAL-02 fix: track latest unlock time for bonus withdrawal
     pub qst_mint: Pubkey,
     pub bump: u8,
 }
@@ -552,6 +661,24 @@ pub struct StakeEvent {
     pub timestamp: i64,
 }
 
+#[event]
+pub struct WithdrawAllEvent {
+    pub user: Pubkey,
+    pub principal_amount: u64,
+    pub bonus_rewards: u64,
+    pub total_withdrawn: u64,
+    pub node_keys_retained: u32,
+    pub timestamp: i64,
+}
+
+// HAL-02 fix: New event for bonus withdrawal
+#[event]
+pub struct BonusWithdrawEvent {
+    pub user: Pubkey,
+    pub bonus_amount: u64,
+    pub timestamp: i64,
+}
+
 #[error_code]
 pub enum ErrorCode {
     #[msg("Amount must be greater than zero")]
@@ -572,6 +699,8 @@ pub enum ErrorCode {
     NoStakeToWithdraw,
     #[msg("Stake window is closed")]
     StakeWindowClosed,
+    #[msg("Cannot unstake while stake window is still active")]
+    StakeWindowStillActive,
     #[msg("Bonus enrollment period has closed")]
     BonusEnrollmentClosed,
     #[msg("Stake window has not been started yet")]
@@ -588,4 +717,11 @@ pub enum ErrorCode {
     Unauthorized,
     #[msg("Numeric overflow")]
     NumericOverflow,
+    // HAL-02 fix: New error codes for bonus withdrawal
+    #[msg("Bonus withdrawal not yet available. Must wait 10 seconds after latest unlock time.")]
+    BonusWithdrawalNotYetAvailable,
+    #[msg("Not enrolled in bonus program")]
+    NotEnrolledInBonus,
+    #[msg("Must withdraw principal first before withdrawing bonus")]
+    MustWithdrawPrincipalFirst,
 }

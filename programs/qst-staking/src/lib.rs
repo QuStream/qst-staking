@@ -274,6 +274,12 @@ pub mod qst_staking_mainnet {
         require!(!stake_account.enrolled_in_bonus, ErrorCode::BonusEnrolledCannotUnstake);
 
         let current_time = Clock::get()?.unix_timestamp;
+
+        // HAL-01 fix: Ensure unstaking only happens after stake window ends
+        require!(
+            current_time > staking_pool.stake_window_end,
+            ErrorCode::StakeWindowStillActive
+        );
         let time_until_unlock = stake_account.principal_unlock_time - current_time;
 
         // Early exit options (relative to current principal unlock date)
@@ -408,12 +414,7 @@ pub mod qst_staking_mainnet {
             .checked_sub(principal_amount)
             .ok_or(ErrorCode::NumericOverflow)?;
 
-        // If enrolled, subtract full principal from enrolled total (use principal_amount before zeroing)
-        if stake_account.enrolled_in_bonus {
-            staking_pool.total_enrolled_stake = staking_pool
-                .total_enrolled_stake
-                .saturating_sub(principal_amount);
-        }
+        // HAL-02 fix: Don't update total_enrolled_stake here - move to withdraw_bonus
 
         emit!(WithdrawAllEvent {
             user: ctx.accounts.user.key(),
@@ -428,7 +429,7 @@ pub mod qst_staking_mainnet {
         let node_keys_to_keep = stake_account.node_keys_earned;
         stake_account.amount = 0;
         stake_account.node_keys_earned = node_keys_to_keep; // Node keys are permanent
-        stake_account.enrolled_in_bonus = false;
+        // HAL-02 fix: Don't reset enrolled_in_bonus here - move to withdraw_bonus
         stake_account.principal_unlock_time = 0;
         stake_account.bonus_unlock_time = 0;
 
@@ -500,10 +501,24 @@ pub mod qst_staking_mainnet {
             timestamp: current_time,
         });
 
+        // HAL-02 fix: Update total_enrolled_stake and reset enrolled_in_bonus here
+        // Get the user's original stake amount for total_enrolled_stake calculation
+        let user_original_stake = (stake_account.node_keys_earned as u64 / KEYS_PER_STAKE as u64) * MINIMUM_STAKE_AMOUNT;
+
+        // Reduce total_enrolled_stake by user's original stake amount
+        staking_pool.total_enrolled_stake = staking_pool
+            .total_enrolled_stake
+            .saturating_sub(user_original_stake);
+
+        // Reset enrolled_in_bonus to prevent repeated withdrawals
+        stake_account.enrolled_in_bonus = false;
+
         msg!(
-            "User {} withdrew {} bonus rewards",
+            "User {} withdrew {} bonus rewards, original stake {}, total_enrolled_stake now {}",
             ctx.accounts.user.key(),
-            bonus_rewards
+            bonus_rewards,
+            user_original_stake,
+            staking_pool.total_enrolled_stake
         );
 
         Ok(())
@@ -987,6 +1002,8 @@ pub enum ErrorCode {
     NoStakeToWithdraw,
     #[msg("Stake window is closed")]
     StakeWindowClosed,
+    #[msg("Cannot unstake while stake window is still active")]
+    StakeWindowStillActive,
     #[msg("Stake window is already active and cannot be restarted")]
     StakeWindowAlreadyActive,
     #[msg("Bonus enrollment period has closed")]
